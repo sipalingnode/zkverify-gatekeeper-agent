@@ -11,6 +11,7 @@ import * as snarkjs from "snarkjs";
 import { keccak_256 } from "@noble/hashes/sha3.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils.js";
+import { buildTurnResponse as buildVfyResponse, initStrategy, isVfyTurn, getCommitment as getVfyCommitment } from "./vfy.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT || 8787);
@@ -220,6 +221,38 @@ async function answer(taskId, env) {
   return responseBody;
 }
 
+// ---------- Steal the VFY ----------
+const vfyTurns = new Map();
+async function handleVfyTurn(env) {
+  const key = `${env.matchId}:${env.turn}`;
+  if (vfyTurns.has(key)) {
+    log({ ev: "vfy.retry", key });
+    return vfyTurns.get(key);
+  }
+  const deadline = Date.parse(env.deadlineAt || env.deadline_at || "");
+  const budget = Number.isNaN(deadline) ? 25000 : Math.max(0, Math.min(25000, deadline - Date.now() - 2000));
+  const work = (async () => {
+    const t0 = Date.now();
+    const body = await buildVfyResponse(env, getVfyCommitment(), budget > 1000 ? budget : 25000);
+    const out = JSON.stringify(body);
+    log({
+      ev: "vfy.turn",
+      matchId: env.matchId,
+      turn: env.turn,
+      action: body.action?.type,
+      amount: body.action?.amount ?? null,
+      proof: !!body.policyProof?.proof,
+      ms: Date.now() - t0,
+    });
+    return out;
+  })();
+  vfyTurns.set(key, work);
+  try { return await work; } catch (e) {
+    vfyTurns.delete(key);
+    throw e;
+  }
+}
+
 function log(o) { console.log(JSON.stringify(o)); }
 
 // ---------- http ----------
@@ -260,6 +293,9 @@ const server = createServer(async (req, res) => {
     if (env?.type === "agent-games.proof-gatekeeper.v1") {
       return send(res, 200, await handleTask(env), key);
     }
+    if (isVfyTurn(env)) {
+      return send(res, 200, await handleVfyTurn(env), key);
+    }
     log({ ev: "request.unknown_type", type: env?.type });
     return send(res, 400, JSON.stringify({ error: "unknown type" }), key);
   } catch (e) {
@@ -278,4 +314,6 @@ const warm = async () => {
 server.listen(PORT, () => {
   log({ ev: "server.listening", port: PORT, taskIdEncoding: TASK_ID_ENCODING, hmacConfigured: KEYS.length > 0 });
   warm();
+  initStrategy().then((c) => log({ ev: "vfy.strategy", commitment: c.toString(), circuitVersion: "v1" }))
+    .catch((e) => log({ ev: "vfy.strategy_failed", error: String(e?.message || e) }));
 });
