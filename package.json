@@ -1,0 +1,9 @@
+{
+  "name": "zkverify-gatekeeper-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "scripts": { "start": "node src/server.js", "probe": "node tools/probe_rule.mjs" },
+  "dependencies": { "@noble/hashes": "^2.4.0", "snarkjs": "^0.7.5" },
+  "engines": { "node": ">=18" }
+}
